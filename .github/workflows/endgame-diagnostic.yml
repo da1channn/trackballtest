@@ -1,4 +1,4 @@
-name: Endgame 1.5.3 button diagnostic
+name: Endgame 1.5.3 raw GPIO diagnostic
 
 on:
   workflow_dispatch:
@@ -50,9 +50,17 @@ jobs:
           old = 'LOG_DBG("Sending event at 0,%i state %s", gpio->index, pressed ? "on" : "off");'
           new = 'LOG_INF("EGDIAG1 button=%u pin=%u state=%s", (unsigned int)gpio->index, (unsigned int)gpio->spec.pin, pressed ? "DOWN" : "UP");'
           assert src.count(old) == 1, 'Unexpected driver; refusing to patch'
-          p.write_text(src.replace(old, new))
+          src = src.replace(old, new)
+          raw = "\n/* Read-only diagnostics: do not reconfigure or drive GPIO pins. */\n#include <hal/nrf_gpio.h>\nstatic uint32_t egdiag_last_in = UINT32_MAX;\nstatic uint32_t egdiag_last_c7 = UINT32_MAX;\nstatic uint32_t egdiag_last_c8 = UINT32_MAX;\nstatic unsigned int egdiag_ticks;\nstatic void egdiag_poll(struct k_work *work);\nK_WORK_DELAYABLE_DEFINE(egdiag_work, egdiag_poll);\nstatic void egdiag_poll(struct k_work *work) {\n    ARG_UNUSED(work);\n    uint32_t input = NRF_P0->IN & (BIT(7) | BIT(8));\n    uint32_t c7 = NRF_P0->PIN_CNF[7];\n    uint32_t c8 = NRF_P0->PIN_CNF[8];\n    if (input != egdiag_last_in || c7 != egdiag_last_c7 ||\n        c8 != egdiag_last_c8 || ++egdiag_ticks >= 20) {\n        LOG_INF(\"EGRAW2 R7=%u L8=%u cfg7=%08x cfg8=%08x\",\n                (unsigned int)((input >> 7) & 1),\n                (unsigned int)((input >> 8) & 1),\n                (unsigned int)c7, (unsigned int)c8);\n        egdiag_last_in = input;\n        egdiag_last_c7 = c7;\n        egdiag_last_c8 = c8;\n        egdiag_ticks = 0;\n    }\n    k_work_reschedule(&egdiag_work, K_MSEC(100));\n}\n"
+          anchor = 'static int kscan_direct_init(const struct device *dev) {'
+          assert src.count(anchor) == 1
+          src = src.replace(anchor, raw + '\n' + anchor)
+          anchor2 = '    data->dev = dev;'
+          assert src.count(anchor2) == 1
+          src = src.replace(anchor2, anchor2 + '\n    k_work_schedule(&egdiag_work, K_SECONDS(3));')
+          p.write_text(src)
           config = root/'config/efogtech_trackball_0.conf'
-          config.write_text(config.read_text() + '\n# Diagnostic: preserve input mappings and timing.\nCONFIG_ZMK_LOG_LEVEL_INF=y\nCONFIG_SHELL_PROMPT_UART="endgame-diag1$ "\n')
+          config.write_text(config.read_text() + '\n# Diagnostic: preserve input mappings and timing.\nCONFIG_ZMK_LOG_LEVEL_INF=y\nCONFIG_SHELL_PROMPT_UART="endgame-diag2$ "\n')
           print('Patched event log before keymap callback; no GPIO or mapping changes.')
           PY
 
@@ -76,7 +84,7 @@ jobs:
           import hashlib, json, shutil, struct, subprocess
           build = Path('firmware/build/zephyr')
           cfg = (build/'.config').read_text()
-          for line in ['CONFIG_ZMK_LOG_LEVEL=4', 'CONFIG_LOG_MAX_LEVEL=3', 'CONFIG_ZMK_USB_LOGGING=y', 'CONFIG_BUILD_OUTPUT_UF2=y', 'CONFIG_SHELL_PROMPT_UART="endgame-diag1$ "']:
+          for line in ['CONFIG_ZMK_LOG_LEVEL=4', 'CONFIG_LOG_MAX_LEVEL=3', 'CONFIG_ZMK_USB_LOGGING=y', 'CONFIG_BUILD_OUTPUT_UF2=y', 'CONFIG_SHELL_PROMPT_UART="endgame-diag2$ "']:
               assert line in cfg.splitlines(), f'Missing configuration: {line}'
           data = (build/'zmk.uf2').read_bytes()
           assert data and len(data) % 512 == 0
@@ -92,10 +100,13 @@ jobs:
               payloads.append(block[32:32+size])
               addresses.append((addr, size))
           payload = b''.join(payloads)
+          assert b'EGRAW2 R7=' in payload, 'Raw GPIO diagnostic missing'
+          assert min(a for a, n in addresses) == 0x1000
+          assert all(0x1000 <= a and a+n <= 0x6c000 for a,n in addresses)
           assert b'EGDIAG1 button=' in payload, 'Diagnostic logging not present in UF2'
-          assert b'endgame-diag1$ ' in payload, 'Diagnostic prompt not present in UF2'
+          assert b'endgame-diag2$ ' in payload, 'Diagnostic prompt not present in UF2'
           out = Path('output'); out.mkdir()
-          dest = out/'Endgame_1.5.3_button_diagnostic_v1.uf2'
+          dest = out/'Endgame_1.5.3_raw_gpio_diagnostic_v2.uf2'
           dest.write_bytes(data)
           shutil.copy(build/'.config', out/'build.config')
           shutil.copy(build/'zephyr.dts', out/'zephyr.dts')
@@ -116,7 +127,7 @@ jobs:
       - name: Upload diagnostic UF2 and verification
         uses: actions/upload-artifact@v4
         with:
-          name: Endgame-1.5.3-button-diagnostic-v1
+          name: Endgame-1.5.3-raw-gpio-diagnostic-v2
           path: output/
           if-no-files-found: error
 
