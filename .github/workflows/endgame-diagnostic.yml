@@ -76,7 +76,7 @@ jobs:
           import hashlib, json, shutil, struct, subprocess
           build = Path('firmware/build/zephyr')
           cfg = (build/'.config').read_text()
-          for line in ['CONFIG_ZMK_LOG_LEVEL=3', 'CONFIG_ZMK_USB_LOGGING=y', 'CONFIG_BUILD_OUTPUT_UF2=y', 'CONFIG_SHELL_PROMPT_UART="endgame-diag1$ "']:
+          for line in ['CONFIG_ZMK_LOG_LEVEL=4', 'CONFIG_LOG_MAX_LEVEL=3', 'CONFIG_ZMK_USB_LOGGING=y', 'CONFIG_BUILD_OUTPUT_UF2=y', 'CONFIG_SHELL_PROMPT_UART="endgame-diag1$ "']:
               assert line in cfg.splitlines(), f'Missing configuration: {line}'
           data = (build/'zmk.uf2').read_bytes()
           assert data and len(data) % 512 == 0
@@ -128,5 +128,6 @@ jobs:
           path: |
             firmware/build/zephyr/.config
             firmware/build/zephyr/zephyr.dts
+            firmware/build/zephyr/zmk.uf2
           include-hidden-files: true
           if-no-files-found: ignore
