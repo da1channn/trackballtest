@@ -1,0 +1,132 @@
+name: Endgame 1.5.3 button diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/endgame-diagnostic.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    steps:
+      - name: Get original Endgame 1.5.3 sources
+        uses: actions/checkout@v4
+        with:
+          repository: efogtech/endgame-trackball-config
+          ref: 099d79d8bd7800169dc5b1b86ee6f17aea4d2d75
+          path: upstream
+          persist-credentials: false
+
+      - name: Fetch pinned firmware dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir firmware
+          cp -R upstream/config firmware/config
+          cd firmware
+          west init -l config
+          west update --fetch-opt=--filter=tree:0
+          west zephyr-export
+
+      - name: Add button-only diagnostic logging
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root = Path('firmware')
+          zmk_sha = subprocess.check_output(['git', '-C', str(root/'zmk'), 'rev-parse', 'HEAD'], text=True).strip()
+          assert zmk_sha.startswith('50d57079'), zmk_sha
+          p = root/'zmk/app/module/drivers/kscan/kscan_gpio_direct.c'
+          src = p.read_text()
+          old = 'LOG_DBG("Sending event at 0,%i state %s", gpio->index, pressed ? "on" : "off");'
+          new = 'LOG_INF("EGDIAG1 button=%u pin=%u state=%s", (unsigned int)gpio->index, (unsigned int)gpio->spec.pin, pressed ? "DOWN" : "UP");'
+          assert src.count(old) == 1, 'Unexpected driver; refusing to patch'
+          p.write_text(src.replace(old, new))
+          config = root/'config/efogtech_trackball_0.conf'
+          config.write_text(config.read_text() + '\n# Diagnostic: preserve input mappings and timing.\nCONFIG_ZMK_LOG_LEVEL=3\nCONFIG_SHELL_PROMPT_UART="endgame-diag1$ "\n')
+          print('Patched event log before keymap callback; no GPIO or mapping changes.')
+          PY
+
+      - name: Compile diagnostic firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd firmware
+          west build -s zmk/app -d build -b efogtech_trackball_0 \
+            -S 'studio-rpc-usb-uart zmk-usb-logging' -- \
+            -DZMK_CONFIG="${GITHUB_WORKSPACE}/firmware/config" \
+            -DZMK_EXTRA_MODULES="${GITHUB_WORKSPACE}/upstream" \
+            -DCONFIG_ZMK_STUDIO=y
+
+      - name: Verify output and collect firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, shutil, struct, subprocess
+          build = Path('firmware/build/zephyr')
+          cfg = (build/'.config').read_text()
+          for line in ['CONFIG_ZMK_LOG_LEVEL=3', 'CONFIG_ZMK_USB_LOGGING=y', 'CONFIG_BUILD_OUTPUT_UF2=y', 'CONFIG_SHELL_PROMPT_UART="endgame-diag1$ "']:
+              assert line in cfg.splitlines(), f'Missing configuration: {line}'
+          data = (build/'zmk.uf2').read_bytes()
+          assert data and len(data) % 512 == 0
+          payloads = []
+          addresses = []
+          for i in range(len(data)//512):
+              block = data[i*512:(i+1)*512]
+              m0, m1, flags, addr, size, num, total, family = struct.unpack_from('<8I', block)
+              assert (m0, m1) == (0x0A324655, 0x9E5D5157)
+              assert struct.unpack_from('<I', block, 508)[0] == 0x0AB16F30
+              assert size <= 476 and num == i and total == len(data)//512
+              assert flags & 0x2000 and family == 0x621E937A, 'Expected nRF52833 UF2'
+              payloads.append(block[32:32+size])
+              addresses.append((addr, size))
+          payload = b''.join(payloads)
+          assert b'EGDIAG1 button=' in payload, 'Diagnostic logging not present in UF2'
+          assert b'endgame-diag1$ ' in payload, 'Diagnostic prompt not present in UF2'
+          out = Path('output'); out.mkdir()
+          dest = out/'Endgame_1.5.3_button_diagnostic_v1.uf2'
+          dest.write_bytes(data)
+          shutil.copy(build/'.config', out/'build.config')
+          shutil.copy(build/'zephyr.dts', out/'zephyr.dts')
+          report = {
+              'base_config_commit': '099d79d8bd7800169dc5b1b86ee6f17aea4d2d75',
+              'zmk_commit': subprocess.check_output(['git','-C','firmware/zmk','rev-parse','HEAD'], text=True).strip(),
+              'sha256': hashlib.sha256(data).hexdigest(),
+              'uf2_blocks': len(data)//512,
+              'min_address': hex(min(a for a, n in addresses)),
+              'max_end_address': hex(max(a+n for a, n in addresses)),
+              'hardware_tested': False,
+              'purpose': 'Log kscan button transitions before keymap callback; preserve original scan configuration'
+          }
+          (out/'verification.json').write_text(json.dumps(report, indent=2)+'\n')
+          print(json.dumps(report, indent=2))
+          PY
+
+      - name: Upload diagnostic UF2 and verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: Endgame-1.5.3-button-diagnostic-v1
+          path: output/
+          if-no-files-found: error
+
+      - name: Upload configuration if compilation fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-build-failure
+          path: |
+            firmware/build/zephyr/.config
+            firmware/build/zephyr/zephyr.dts
+          include-hidden-files: true
+          if-no-files-found: ignore
