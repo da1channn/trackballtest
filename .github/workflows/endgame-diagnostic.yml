@@ -52,7 +52,7 @@ jobs:
           assert src.count(old) == 1, 'Unexpected driver; refusing to patch'
           p.write_text(src.replace(old, new))
           config = root/'config/efogtech_trackball_0.conf'
-          config.write_text(config.read_text() + '\n# Diagnostic: preserve input mappings and timing.\nCONFIG_ZMK_LOG_LEVEL=3\nCONFIG_SHELL_PROMPT_UART="endgame-diag1$ "\n')
+          config.write_text(config.read_text() + '\n# Diagnostic: preserve input mappings and timing.\nCONFIG_ZMK_LOG_LEVEL_INF=y\nCONFIG_SHELL_PROMPT_UART="endgame-diag1$ "\n')
           print('Patched event log before keymap callback; no GPIO or mapping changes.')
           PY
 
